@@ -1,0 +1,13 @@
+
+.env
+
+__pycache__/
+
+.venv/
+
+data/
+
+minio_data/
+
+logs/
+
