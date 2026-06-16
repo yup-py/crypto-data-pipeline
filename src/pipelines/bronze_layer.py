@@ -1,62 +1,36 @@
 import os
 import json
-import logging
 from datetime import datetime, timezone
 import requests
-from botocore.exceptions import ClientError
 from src.config.minio_config import BRONZE_BUCKET
 from src.utils.minio_client import get_s3_client
+from src.utils.pipeline_utils import get_pipeline_logger, ensure_bucket_exists
 
-# CoinGecko API Configuration
+# Configuration Endpoints
 COINGECKO_API_URL = "https://api.coingecko.com/api/v3/coins/markets"
-API_KEY = os.environ.get("COINGECKO_API_KEY")
 
-def setup_logging():
-    """Configures streaming handlers for native Airflow console tracking."""
-    log_format = logging.Formatter(
-        fmt="[%(asctime)s] [%(levelname)s] [%(filename)s:%(lineno)d]: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    if logger.hasHandlers():
-        logger.handlers.clear()
+# Initialize logger safely at module level
+logger = get_pipeline_logger(__name__)
+
+
+def validate_environment():
+    """Validates that all required environment variables are present at runtime."""
+    api_key = os.environ.get("COINGECKO_API_KEY")
+    if not api_key:
+        logger.critical("COINGECKO_API_KEY is missing from environment variables or .env file.")
+        raise ValueError("CRITICAL: COINGECKO_API_KEY is missing from environment configuration.")
+
+    if not os.environ.get("AWS_ACCESS_KEY_ID") or not os.environ.get("AWS_SECRET_ACCESS_KEY"):
+        logger.critical("Infrastructure automation credentials missing from the environment.")
+        raise ValueError("CRITICAL: Storage layer validation credentials missing.")
         
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(log_format)
-    logger.addHandler(console_handler)
-    return logger
+    return api_key
 
-logger = setup_logging()
 
-# Runtime Guard Rings
-if not API_KEY:
-    logger.critical("COINGECKO_API_KEY is missing from environment variables or .env file.")
-    raise ValueError("CRITICAL: COINGECKO_API_KEY is missing from environment configuration.")
-
-if not os.environ.get("AWS_ACCESS_KEY_ID") or not os.environ.get("AWS_SECRET_ACCESS_KEY"):
-    logger.critical("Infrastructure automation credentials missing from the environment.")
-    raise ValueError("CRITICAL: Storage layer validation credentials missing.")
-
-def ensure_bucket_exists(s3_client):
-    """Verifies existence of the target storage bucket or creates it if missing."""
-    try:
-        s3_client.head_bucket(Bucket=BRONZE_BUCKET)
-        logger.info(f"Target validation passed: Bucket '{BRONZE_BUCKET}' is active.")
-    except ClientError as e:
-        error_code = e.response['Error']['Code']
-        if error_code == '404':
-            logger.warning(f"Bucket '{BRONZE_BUCKET}' does not exist. Initializing provisioning sequence...")
-            s3_client.create_bucket(Bucket=BRONZE_BUCKET)
-            logger.info(f"Successfully provisioned infrastructure storage bucket: {BRONZE_BUCKET}")
-        else:
-            logger.error(f"Failed to validate bucket existence with MinIO server code: {error_code}")
-            raise
-
-def fetch_market_data():
-    """Fetches real-time cryptocurrency market metrics from CoinGecko API."""
+def fetch_market_data(api_key):
+    """Fetches real-time cryptocurrency market metrics from CoinGecko API using a validated key."""
     params = {"vs_currency": "usd", "per_page": 250, "page": 1}
-    headers = {"accept": "application/json", "x-cg-demo-api-key": API_KEY}
+    headers = {"accept": "application/json", "x-cg-demo-api-key": api_key}
     
     try:
         logger.info("Initiating network request handshake with CoinGecko API endpoints...")
@@ -77,6 +51,7 @@ def fetch_market_data():
         logger.error(f"Low-level protocol interface connectivity failure: {err}")
         raise
 
+
 def upload_to_minio(s3_client, json_data):
     """Streams the raw JSON data payload into the structured MinIO folder tree path."""
     now = datetime.now(timezone.utc)
@@ -85,20 +60,30 @@ def upload_to_minio(s3_client, json_data):
     
     logger.info(f"Preparing object streaming transmission payload targeting: s3://{BRONZE_BUCKET}/{object_key}")
     s3_client.put_object(
-        Bucket=BRONZE_BUCKET,
-        Key=object_key,
-        Body=json_bytes,
-        ContentType='application/json'
+        Bucket=BRONZE_BUCKET, Key=object_key, Body=json_bytes, ContentType='application/json'
     )
     logger.info("Object transport serialization acknowledged. Storage transaction finalized.")
+
+
+def run_bronze_ingestion(**kwargs):
+    """Entry point for Airflow PythonOperator."""
+    logger.info("--- Starting Bronze Data Ingestion ---")
+    
+    # Run environment guard checks strictly inside the active execution context
+    api_key = validate_environment()
+    
+    s3 = get_s3_client()
+    ensure_bucket_exists(s3, BRONZE_BUCKET)
+    
+    raw_payload = fetch_market_data(api_key)
+    upload_to_minio(s3, raw_payload)
+    logger.info("Bronze ingestion finished.")
+
 
 if __name__ == "__main__":
     logger.info("--- Beginning Automated Daily Bronze Data Ingestion Run ---")
     try:
-        s3 = get_s3_client()
-        ensure_bucket_exists(s3)
-        raw_payload = fetch_market_data()
-        upload_to_minio(s3, raw_payload)
+        run_bronze_ingestion()
         logger.info("🎉 Étape 1: Bronze ingestion execution runtime sequence finalized successfully.\n")
     except Exception as e:
         logger.critical(f"❌ Pipeline sequence terminated unexpectedly: {e}\n")
