@@ -1,0 +1,10 @@
+{
+    "python.analysis.extraPaths": [
+        "./1_crypto-data-pipeline",
+        "./1_crypto-data-pipeline/src"
+    ],
+    "python.analysis.autoSearchPaths": true,
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportMissingImports": "none"
+    }
+}
